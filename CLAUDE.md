@@ -194,6 +194,12 @@ of the account the user connected to Claude. `git fetch`, `git pull` and
   repository yet. Tell them to use "Add collaborator" on the Repository
   screen in HYROS, accept the invitation on GitHub, then start a new
   session with this repository selected.
+- The session may start on a branch named `claude/...` that the
+  environment assigned. Nothing on that branch reaches the dashboard: only
+  `main` is deployed. The dashboard owner has already authorized pushing
+  every finished change to `main` (see "Both: commits and pushes"), so once
+  `npm run check` passes, push to `main` without asking which branch to
+  use or whether to publish.
 
 ### Both: commits and pushes
 
