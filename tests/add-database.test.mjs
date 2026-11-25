@@ -5,6 +5,7 @@
  */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -58,7 +59,12 @@ test('every fixed file starts with the same add-database version line', async ()
   assert.equal(versions.size, 1, 'one version for all the fixed files, raised together');
 });
 
-test('the template carries no database file outside the skill', async () => {
+// Dashboards are copies of the template, so only the git remote tells them apart. A dashboard may have its own
+// api/ or supabase/, or get them from the skill, so the check runs in the template only.
+const origin = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: ROOT, encoding: 'utf8' }).stdout ?? '';
+const IN_TEMPLATE = /[/:]hyros-custom(\.git)?\s*$/.test(origin);
+
+test('the template carries no database file outside the skill', { skip: !IN_TEMPLATE && 'a dashboard, not the template' }, async () => {
   for (const path of ['api', 'supabase', 'src/core/db.js']) {
     assert.ok(!existsSync(join(ROOT, path)), `${path} exists only once the skill copied it`);
   }
