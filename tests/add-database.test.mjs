@@ -1,7 +1,8 @@
 /**
  * The add-database skill's fixed files, tested where they live (.claude/skills/add-database/files/) so a
- * dashboard without a database never carries them. What needs the postgres package (db.js, respond.js and
- * migrate() with a url) is not loaded here: the template has no dependencies.
+ * dashboard without a database never carries them. What needs the postgres package (respond.js, migrate() with
+ * a url, db.js's client) is not loaded here: the template has no dependencies. db.js loads it only with a url, so
+ * its one-statement-at-a-time wrapper is tested over a fake client.
  */
 import { test, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,6 +19,7 @@ const at = (path) => new URL(`../.claude/skills/add-database/files/${path}`, imp
 const { HttpError, toResponse, badRequest, notFound } = await import(at('api/_lib/errors.js'));
 const { bearer, verifyWithHyros, requireDashboardUser, identifyCaller, isCronSecret, clearCache, CACHE_MS } = await import(at('api/_lib/auth.js'));
 const { migrate, migrationFiles } = await import(at('supabase/migrate.mjs'));
+const { oneAtATime, hasDatabase, sql: noSql } = await import(at('api/_lib/db.js'));
 // src/core/db.js imports ./api.js: install it next to the template's core, as the skill does in a dashboard.
 const core = join(await mkdtemp(join(tmpdir(), 'core-')), 'src', 'core');
 await cp(join(ROOT, 'src', 'core'), core, { recursive: true });
@@ -249,4 +251,99 @@ test('db.get, post, patch and del pass their wait to the request', async () => {
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+/**
+ * A stand-in for a postgres.js client: a statement is a promise that goes to the client's dispatcher only when
+ * awaited, as postgres.js does, and answers after `answerIn` ms, never when the text says `hang`.
+ */
+function fakeClient(wire) {
+  class Query extends Promise {
+    static get [Symbol.species]() { return Promise; }
+    constructor(strings, args, handler) {
+      let resolve, reject;
+      super((a, b) => { resolve = a; reject = b; });
+      Object.assign(this, { strings, args, handler, resolve, reject, executed: false, cancelled: null });
+    }
+    handle() { if (!this.executed) { this.executed = true; Promise.resolve().then(() => this.handler(this)); } }
+    then(...a) { this.handle(); return super.then(...a); }
+    catch(...a) { this.handle(); return super.catch(...a); }
+  }
+  const client = (strings, ...args) => (Array.isArray(strings.raw) ? new Query(strings, args, dispatch) : { helper: strings });
+  function dispatch(q) {
+    if (client.ended) return q.reject(Object.assign(new Error('ended'), { code: 'CONNECTION_ENDED' }));
+    const text = q.strings.join('?');
+    wire.inFlight++;
+    wire.peak = Math.max(wire.peak, wire.inFlight);
+    wire.sent.push(text);
+    if (text.includes('hang')) return;
+    setTimeout(() => { wire.inFlight--; text.includes('fail') ? q.reject(new Error('failed')) : q.resolve([{ text }]); }, wire.answerIn);
+  }
+  client.end = async () => { client.ended = true; wire.ended++; };
+  client.json = (value) => ({ json: value });
+  client.begin = async (fn) => { wire.sent.push('begin'); return fn(client); };
+  return client;
+}
+
+function wired() {
+  const wire = { inFlight: 0, peak: 0, sent: [], ended: 0, made: 0, answerIn: 5 };
+  return { wire, connect: () => (wire.made++, fakeClient(wire)) };
+}
+
+test('without a database url there is no client to load', () => {
+  assert.equal(hasDatabase, false);
+  assert.equal(noSql, null);
+});
+
+test('different statements sent together go out one at a time, and each answers its own caller', async () => {
+  const { wire, connect } = wired();
+  const sql = oneAtATime(connect);
+  const rows = await Promise.all([sql`select 1`, sql`select now()`, sql`select ${1}`, sql`select * from pg_class`, sql`select 5`]);
+  assert.equal(wire.peak, 1, 'never two statements on the wire');
+  assert.deepEqual(rows.map((r) => r[0].text), ['select 1', 'select now()', 'select ?', 'select * from pg_class', 'select 5']);
+});
+
+test('a statement never awaited, like a nested fragment, never takes a turn', async () => {
+  const { wire, connect } = wired();
+  const sql = oneAtATime(connect);
+  sql`where id = ${1}`;
+  await sql`select 1`;
+  assert.deepEqual(wire.sent, ['select 1']);
+  assert.deepEqual(sql('id'), { helper: 'id' }, 'helpers go to the client as they are');
+  assert.deepEqual(sql.json({ a: 1 }), { json: { a: 1 } });
+});
+
+test('a failing statement fails its caller and the next one still runs', async () => {
+  const { wire, connect } = wired();
+  const sql = oneAtATime(connect);
+  const [failed, next] = await Promise.allSettled([sql`select fail`, sql`select 2`]);
+  assert.equal(failed.status, 'rejected');
+  assert.equal(next.value[0].text, 'select 2');
+  assert.equal(wire.peak, 1);
+});
+
+test('a statement with no answer times out, the connection is replaced, and the line recovers', async () => {
+  const { wire, connect } = wired();
+  const sql = oneAtATime(connect, { timeoutMs: 30 });
+  const waiting = sql`select 2`;
+  await assert.rejects(Promise.all([sql`select hang`, waiting]), { code: 'QUERY_TIMEOUT' });
+  assert.equal((await waiting)[0].text, 'select 2', 'the statement queued behind it runs on the new connection');
+  assert.equal(wire.made, 2);
+  assert.equal(wire.ended, 1, 'the hung connection is torn down');
+  assert.equal((await sql`select 3`)[0].text, 'select 3');
+});
+
+test('a transaction is one turn', async () => {
+  const { wire, connect } = wired();
+  const sql = oneAtATime(connect);
+  const [inside] = await Promise.all([
+    sql.begin(async (tx) => {
+      await tx`select in tx`;
+      return (await tx`select again in tx`)[0].text;
+    }),
+    sql`select outside`,
+  ]);
+  assert.equal(inside, 'select again in tx');
+  assert.deepEqual(wire.sent, ['begin', 'select in tx', 'select again in tx', 'select outside'], 'nothing slips in between');
+  assert.equal(wire.peak, 1);
 });
