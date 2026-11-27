@@ -3,7 +3,7 @@
  * dashboard without a database never carries them. What needs the postgres package (db.js, respond.js and
  * migrate() with a url) is not loaded here: the template has no dependencies.
  */
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { cp, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -187,4 +187,66 @@ test('a route error reaches the view as a DbError with its code', async () => {
   await assert.rejects(request('GET', 'notes', { params: { stage: 'won' }, fetchFn }), (err) => err instanceof DbError && err.code === 'storage_full' && err.status === 507);
   await assert.rejects(request('GET', '../secrets', { fetchFn }), { code: 'bad_request' }, 'a route name never leaves /api/db/');
   assert.equal(typeof db.get, 'function');
+});
+
+/** A route that never answers: the fetch only ends when the page gives up. */
+const silentRoute = (seen = []) => (href, init) => {
+  seen.push(href);
+  return new Promise((_, reject) => {
+    init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+};
+
+/** Starts `call` under fake timers and tells whether it gave up at `ms` and not a millisecond before. */
+async function givesUpAt(ms, call) {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let settled = false;
+    const pending = call().catch((err) => err).finally(() => { settled = true; });
+    await new Promise((resolve) => { setImmediate(resolve); });
+    mock.timers.tick(ms - 1);
+    await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(settled, false, `still waiting at ${ms - 1} ms`);
+    mock.timers.tick(1);
+    const err = await pending;
+    assert.ok(err instanceof DbError && err.code === 'timeout', `gave up at ${ms} ms with a timeout`);
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+test('a call gives up after 20 s unless it asks for another wait', async () => {
+  configure({ url: 'https://api.test/v1/api/v1.0', getToken: async () => 'tok', markInvalid: () => {} });
+
+  await givesUpAt(20000, () => request('GET', 'notes', { fetchFn: silentRoute() }));
+  await givesUpAt(20000, () => request('GET', 'notes', { timeoutMs: undefined, fetchFn: silentRoute() }));
+  await givesUpAt(90000, () => request('POST', 'summary', { body: { id: 1 }, timeoutMs: 90000, fetchFn: silentRoute() }));
+});
+
+test('the retry with a new token waits as long as the first try', async () => {
+  let n = 0;
+  configure({ url: 'https://api.test/v1/api/v1.0', getToken: async () => `tok-${++n}`, markInvalid: () => {} });
+  const seen = [];
+  const silent = silentRoute(seen);
+  const fetchFn = (href, init) => (seen.length === 0
+    ? (seen.push(href), Promise.resolve({ status: 401, ok: false, json: async () => ({ error: { code: 'auth', message: 'refused' } }) }))
+    : silent(href, init));
+
+  await givesUpAt(45000, () => request('GET', 'notes', { timeoutMs: 45000, fetchFn }));
+  assert.equal(seen.length, 2, 'refused once, then retried');
+});
+
+test('db.get, post, patch and del pass their wait to the request', async () => {
+  configure({ url: 'https://api.test/v1/api/v1.0', getToken: async () => 'tok', markInvalid: () => {} });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = silentRoute();
+  try {
+    await givesUpAt(30000, () => db.get('notes', { stage: 'won' }, { timeoutMs: 30000 }));
+    await givesUpAt(30000, () => db.post('notes', { text: 'hi' }, { timeoutMs: 30000 }));
+    await givesUpAt(30000, () => db.patch('notes', { id: 1 }, { timeoutMs: 30000 }));
+    await givesUpAt(30000, () => db.del('notes', { id: 1 }, { timeoutMs: 30000 }));
+    await givesUpAt(20000, () => db.get('notes'));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

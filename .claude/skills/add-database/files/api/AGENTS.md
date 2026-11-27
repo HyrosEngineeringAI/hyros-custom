@@ -1,4 +1,4 @@
-<!-- add-database v2. Copied by the add-database skill: do not edit, run the skill again to update it. -->
+<!-- add-database v3. Copied by the add-database skill: do not edit, run the skill again to update it. -->
 # The dashboard's database
 
 This dashboard has its own Postgres database (Supabase), created by HYROS when the owner asked for it, and
@@ -85,12 +85,34 @@ export default route(['GET'], async ({ sql }) => {
 - Schedule within what the Vercel plan allows; a schedule the plan refuses fails the deploy, and the previous
   deployment stays live.
 
+## Slow work
+
+Two clocks run on every call. The page waits 20 s for a route (`src/core/db.js`), then gives up with
+`timeout` while the function goes on. Vercel stops the function at the project's maximum duration (300 s
+unless the project says otherwise); one route can ask for more with `export const config = { maxDuration: 180 }`.
+
+- **A route that is slow but finishes** (a heavy query): the view waits longer for that one call,
+  `db.get('report', { month }, { timeoutMs: 60000 })`. Keep it well under the function's limit.
+- **A model's answer, or anything that can outlast the wait:** never answer it in one request. Save the
+  request and read the result back by id:
+
+  1. `POST` saves a row with status `pending` and answers its id at once.
+  2. The work runs apart and writes the result to that row: a route the page fires without waiting for it
+     (`db.post('summary/work', {}).catch(() => {})`), and a cron job (above) that picks up rows left `pending`.
+  3. The view reads the row by id with `db.get` every few seconds and shows that it is working until the
+     status is `done`.
+
+  A row still `pending` past a time you set is marked `failed`, so the view stops waiting and offers a retry.
+  A raised `timeoutMs` is not a substitute: a model can outlast any wait, and an answer nobody is waiting
+  for is lost unless the route saved it.
+
 ## Limits to know
 
 - **Disk:** 8 GB. When it fills, the database turns read only and writes answer `storage_full` (507). Keep
   tables lean and delete what is no longer needed.
 - **Connections:** each function instance holds one through the pooler; keep queries short.
-- **Functions:** a request must answer within Vercel's time limit; long work does not belong in a route.
+- **Functions:** a request must answer within Vercel's time limit; long work does not belong in a route
+  (see "Slow work").
 
 ## Fixed files
 

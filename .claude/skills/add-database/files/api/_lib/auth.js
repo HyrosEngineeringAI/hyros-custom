@@ -1,4 +1,4 @@
-// add-database v2. Copied by the add-database skill: do not edit, run the skill again to update it.
+// add-database v3. Copied by the add-database skill: do not edit, run the skill again to update it.
 /**
  * Who is calling a route under `api/`. Those routes are public urls, so every request must carry a bearer
  * token (`Authorization: Bearer`), and a route names who may call it (`route(..., { callers })`):
