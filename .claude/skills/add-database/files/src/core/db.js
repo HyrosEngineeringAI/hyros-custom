@@ -1,4 +1,4 @@
-// add-database v2. Copied by the add-database skill: do not edit, run the skill again to update it.
+// add-database v3. Copied by the add-database skill: do not edit, run the skill again to update it.
 /**
  * The page's way to its own database: the routes the dashboard defines under `api/db/`, on the same origin as
  * the page. Views import it (`import { db } from '../../core/db.js'`) and never call `fetch`, the same rule as
@@ -9,6 +9,10 @@
  *   db.post('notes', { text })               POST   /api/db/notes
  *   db.patch('notes', { id, text })          PATCH  /api/db/notes
  *   db.del('notes', { id })                  DELETE /api/db/notes?id=...
+ *
+ * The page waits 20 s for a route. A route that is slow but finishes takes a third argument:
+ * `db.get('report', { month }, { timeoutMs: 60000 })`. Work that can take longer, like a model's answer,
+ * does not belong in one request: see "Slow work" in `api/AGENTS.md`.
  *
  * A failure rejects with a DbError whose `code` is the route's: 'auth' (after one retry with a new token),
  * 'forbidden', 'bad_request', 'not_found', 'storage_full', 'no_database', 'unavailable', 'timeout',
@@ -38,9 +42,9 @@ function hrefOf(name, params) {
   return `/api/db/${name}${qs ? `?${qs}` : ''}`;
 }
 
-async function attempt(method, href, token, body, fetchFn) {
+async function attempt(method, href, token, body, fetchFn, timeoutMs) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const headers = { accept: 'application/json', authorization: `Bearer ${token}` };
   if (body !== undefined) headers['content-type'] = 'application/json';
   try {
@@ -58,25 +62,28 @@ async function attempt(method, href, token, body, fetchFn) {
   }
 }
 
-/** One request; a refused token is reported once and the call is retried with a new one. `fetchFn` exists for tests. */
-export async function request(method, name, { params, body, fetchFn = globalThis.fetch } = {}) {
+/**
+ * One request, given up after `timeoutMs`; a refused token is reported once and the call is retried with a new one.
+ * `fetchFn` exists for tests.
+ */
+export async function request(method, name, { params, body, timeoutMs = TIMEOUT_MS, fetchFn = globalThis.fetch } = {}) {
   const href = hrefOf(name, params);
   const source = credential();
   if (!source) throw new DbError('The dashboard is not signed in yet', 'auth');
   let token = await source.getToken();
-  let out = await attempt(method, href, token, body, fetchFn);
+  let out = await attempt(method, href, token, body, fetchFn, timeoutMs);
   if (!out.ok && out.status === 401) {
     source.markInvalid(token);
     token = await source.getToken('unauthorized');
-    out = await attempt(method, href, token, body, fetchFn);
+    out = await attempt(method, href, token, body, fetchFn, timeoutMs);
   }
   if (out.ok) return out.value;
   throw new DbError(out.message, out.code, out.status);
 }
 
 export const db = Object.freeze({
-  get: (name, params) => request('GET', name, { params }),
-  post: (name, body) => request('POST', name, { body }),
-  patch: (name, body) => request('PATCH', name, { body }),
-  del: (name, params) => request('DELETE', name, { params }),
+  get: (name, params, { timeoutMs } = {}) => request('GET', name, { params, timeoutMs }),
+  post: (name, body, { timeoutMs } = {}) => request('POST', name, { body, timeoutMs }),
+  patch: (name, body, { timeoutMs } = {}) => request('PATCH', name, { body, timeoutMs }),
+  del: (name, params, { timeoutMs } = {}) => request('DELETE', name, { params, timeoutMs }),
 });

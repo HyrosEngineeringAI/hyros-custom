@@ -1,4 +1,4 @@
-// add-database v2. Copied by the add-database skill: do not edit, run the skill again to update it.
+// add-database v3. Copied by the add-database skill: do not edit, run the skill again to update it.
 /**
  * Every route under `api/db/` is one `route(...)`: it allows only the listed methods, checks the caller
  * (`auth.js`), runs the handler and answers JSON. A failure answers `{ error: { code, message } }` with the
