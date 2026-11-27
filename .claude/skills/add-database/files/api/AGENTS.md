@@ -1,4 +1,4 @@
-<!-- add-database v3. Copied by the add-database skill: do not edit, run the skill again to update it. -->
+<!-- add-database v4. Copied by the add-database skill: do not edit, run the skill again to update it. -->
 # The dashboard's database
 
 This dashboard has its own Postgres database (Supabase), created by HYROS when the owner asked for it, and
@@ -92,7 +92,8 @@ Two clocks run on every call. The page waits 20 s for a route (`src/core/db.js`)
 unless the project says otherwise); one route can ask for more with `export const config = { maxDuration: 180 }`.
 
 - **A route that is slow but finishes** (a heavy query): the view waits longer for that one call,
-  `db.get('report', { month }, { timeoutMs: 60000 })`. Keep it well under the function's limit.
+  `db.get('report', { month }, { timeoutMs: 60000 })`. Keep it well under the function's limit, and each
+  statement under 2 minutes ("Limits to know").
 - **A model's answer, or anything that can outlast the wait:** never answer it in one request. Save the
   request and read the result back by id:
 
@@ -110,7 +111,11 @@ unless the project says otherwise); one route can ask for more with `export cons
 
 - **Disk:** 8 GB. When it fills, the database turns read only and writes answer `storage_full` (507). Keep
   tables lean and delete what is no longer needed.
-- **Connections:** each function instance holds one through the pooler; keep queries short.
+- **Connections:** each function instance holds one through the pooler, and `sql` sends one statement at a
+  time on it: the pooler hangs on several sent together. `Promise.all` over queries is safe but no faster.
+  A statement or an `sql.begin` transaction that takes over 2 minutes fails with `unavailable` (503) and the
+  connection is replaced. Keep queries short, never wait on anything but the database inside `sql.begin`, and
+  inside it use the transaction's own `sql`. Cursors (`.cursor()`) are not supported.
 - **Functions:** a request must answer within Vercel's time limit; long work does not belong in a route
   (see "Slow work").
 

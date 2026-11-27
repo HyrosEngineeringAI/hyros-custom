@@ -1,4 +1,4 @@
-// add-database v3. Copied by the add-database skill: do not edit, run the skill again to update it.
+// add-database v4. Copied by the add-database skill: do not edit, run the skill again to update it.
 /** The errors a route answers with, and how a thrown error maps to one. No dependency, so it is tested without a database. */
 
 /** An error with the HTTP status and the code the page reads (`src/core/db.js`). */
@@ -13,8 +13,8 @@ export class HttpError extends Error {
 export const badRequest = (message) => new HttpError(400, 'bad_request', message);
 export const notFound = (message = 'Not found') => new HttpError(404, 'not_found', message);
 
-/** Connection failures of the database or the pooler, and Postgres refusing new connections. */
-const UNAVAILABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', '57P01', '53300']);
+/** Connection failures of the database or the pooler, a statement that got no answer (`db.js`), and Postgres refusing new connections. */
+const UNAVAILABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', 'CONNECTION_DESTROYED', 'QUERY_TIMEOUT', '57P01', '53300']);
 
 /** The status, code and message a thrown error answers with. */
 export function toResponse(err) {
